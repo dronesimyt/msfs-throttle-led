@@ -1,7 +1,5 @@
 <head>
   <meta charset="utf-8" />
-  <meta description="MSFS Throttle LED" />
-  <meta publisher="DroneSim" />
   <title>MSFS Throttle LED</title>
 </head>
 
@@ -15,41 +13,82 @@
 
   let thr = 0; // 0..100
 
-  // ---- DESIGN TWEAKS ----
-  const PULSE_BLUE = true; // set false for solid blue
-  const DRAW_THREE_BARS = true; // set false for one big bar
+  // Event semantics:
+  // C1 = BAR color
+  // C2 = BACKGROUND color
+  let barColor = [255, 0, 0];
+  let bgColor = [0, 0, 255];
 
-  // Where to place the bars (normalized 0..1)
-  const BAR_X = 0.0; // start at left edge
-  const BAR_W = 1.0; // full width
-  const BAR_H = 0.07; // thickness of each bar (7% of screen height)
-  const GAP = 0.02; // vertical gap between bars
+  // DESIGN
+  const PULSE_BG = false; // set true if you want subtle pulsing
+  const DRAW_THREE_BARS = true; // keep your 3 bars look
 
-  // vertical start (center-ish)
+  const BAR_X = 0.0;
+  const BAR_W = 1.0;
+  const BAR_H = 0.07;
+  const GAP = 0.02;
   const START_Y = 0.55;
 
-  function onCanvasApiEvent(apiEvent) {
-    if (!apiEvent) return;
-    if (apiEvent.sender !== "MSFSBridge") return;
-
-    const s = String(apiEvent.event ?? "");
-    const m = s.match(/THR=(\d+(\.\d+)?)/);
-    if (!m) return;
-
-    const v = parseFloat(m[1]);
-    if (!Number.isNaN(v)) thr = Math.max(0, Math.min(100, v));
+  function clamp255(x) {
+    x = Number(x) || 0;
+    return x < 0 ? 0 : x > 255 ? 255 : x;
   }
 
-  function drawBackground(W, H) {
-    if (PULSE_BLUE) {
-      const t = Date.now() / 1000;
-      const pulse = Math.floor(100 + (Math.sin(t * 3) * 50 + 50)); // ~100..255
-      ctx.fillStyle = `rgb(0,0,${pulse})`;
-      // ctx.fillStyle = "rgb(0,255,0)";
-      // ctx.fillStyle = "rgb(0,0,255)";
-    } else {
-      ctx.fillStyle = "rgb(0, 0, 243)";
+  function handleEvent(evStr) {
+    let s = String(evStr ?? "");
+
+    // Safe to keep: if SignalRGB ever passes encoded strings, this still works.
+    try {
+      s = decodeURIComponent(s);
+    } catch (e) {}
+
+    // THR=<float>
+    let m = s.match(/THR=(\d+(\.\d+)?)/);
+    if (m) {
+      const v = parseFloat(m[1]);
+      if (!Number.isNaN(v)) thr = Math.max(0, Math.min(100, v));
+      return;
     }
+
+    // C1/C2=R,G,B (tolerates spaces)
+    m = s.match(/C([12])\s*=\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)/);
+    if (m) {
+      const rgb = [
+        clamp255(parseInt(m[2], 10)),
+        clamp255(parseInt(m[3], 10)),
+        clamp255(parseInt(m[4], 10)),
+      ];
+      if (m[1] === "1") barColor = rgb;
+      else bgColor = rgb;
+    }
+  }
+
+  // SignalRGB callback
+  function onCanvasApiEvent(apiEvent) {
+    try {
+      if (apiEvent && typeof apiEvent === "object") {
+        handleEvent(apiEvent.event);
+      } else {
+        handleEvent(apiEvent);
+      }
+    } catch (e) {
+      // stay silent in production
+    }
+  }
+  window.onCanvasApiEvent = onCanvasApiEvent;
+
+  function drawBackground(W, H) {
+    let [r, g, b] = bgColor;
+
+    if (PULSE_BG) {
+      const t = Date.now() / 1000;
+      const mult = 0.85 + 0.15 * (Math.sin(t * 1.5) * 0.5 + 0.5);
+      r = clamp255(Math.round(r * mult));
+      g = clamp255(Math.round(g * mult));
+      b = clamp255(Math.round(b * mult));
+    }
+
+    ctx.fillStyle = `rgb(${r},${g},${b})`;
     ctx.fillRect(0, 0, W, H);
   }
 
@@ -59,12 +98,11 @@
     const w = Math.max(1, Math.round(nw * W));
     const h = Math.max(1, Math.round(nh * H));
 
-    // Red fill
     const fillW = Math.round(w * frac);
-    ctx.fillStyle = "rgb(255,0,0)";
+
+    ctx.fillStyle = `rgb(${barColor[0]},${barColor[1]},${barColor[2]})`;
     ctx.fillRect(x, y, fillW, h);
 
-    // Optional faint outline (helps visually)
     ctx.strokeStyle = "rgba(255,255,255,0.15)";
     ctx.strokeRect(x, y, w, h);
   }
@@ -84,7 +122,6 @@
       drawBar(W, H, BAR_X, START_Y + 1 * (BAR_H + GAP), BAR_W, BAR_H, frac);
       drawBar(W, H, BAR_X, START_Y + 2 * (BAR_H + GAP), BAR_W, BAR_H, frac);
     } else {
-      // One big chunky bar (takes 25% of screen height)
       drawBar(W, H, 0.0, 0.62, 1.0, 0.25, frac);
     }
 
