@@ -1,0 +1,95 @@
+<head>
+  <meta charset="utf-8" />
+  <meta description="MSFS Throttle LED" />
+  <meta publisher="DroneSim" />
+  <title>MSFS Throttle LED</title>
+</head>
+
+<body style="margin: 0; padding: 0; overflow: hidden">
+  <canvas id="c"></canvas>
+</body>
+
+<script>
+  const c = document.getElementById("c");
+  const ctx = c.getContext("2d");
+
+  let thr = 0; // 0..100
+
+  // ---- DESIGN TWEAKS ----
+  const PULSE_BLUE = true; // set false for solid blue
+  const DRAW_THREE_BARS = true; // set false for one big bar
+
+  // Where to place the bars (normalized 0..1)
+  const BAR_X = 0.0; // start at left edge
+  const BAR_W = 1.0; // full width
+  const BAR_H = 0.07; // thickness of each bar (7% of screen height)
+  const GAP = 0.02; // vertical gap between bars
+
+  // vertical start (center-ish)
+  const START_Y = 0.55;
+
+  function onCanvasApiEvent(apiEvent) {
+    if (!apiEvent) return;
+    if (apiEvent.sender !== "MSFSBridge") return;
+
+    const s = String(apiEvent.event ?? "");
+    const m = s.match(/THR=(\d+(\.\d+)?)/);
+    if (!m) return;
+
+    const v = parseFloat(m[1]);
+    if (!Number.isNaN(v)) thr = Math.max(0, Math.min(100, v));
+  }
+
+  function drawBackground(W, H) {
+    if (PULSE_BLUE) {
+      const t = Date.now() / 1000;
+      const pulse = Math.floor(200 + (Math.sin(t * 1.5) * 27 + 27)); // ~200..254
+      // ctx.fillStyle = `rgb(0,0,${pulse})`;
+      // ctx.fillStyle = "rgb(0,255,0)";
+      ctx.fillStyle = "rgb(0,0,255)";
+    } else {
+      ctx.fillStyle = "rgb(0, 0, 243)";
+    }
+    ctx.fillRect(0, 0, W, H);
+  }
+
+  function drawBar(W, H, nx, ny, nw, nh, frac) {
+    const x = Math.round(nx * W);
+    const y = Math.round(ny * H);
+    const w = Math.max(1, Math.round(nw * W));
+    const h = Math.max(1, Math.round(nh * H));
+
+    // Red fill
+    const fillW = Math.round(w * frac);
+    ctx.fillStyle = "rgb(255,0,0)";
+    ctx.fillRect(x, y, fillW, h);
+
+    // Optional faint outline (helps visually)
+    ctx.strokeStyle = "rgba(255,255,255,0.15)";
+    ctx.strokeRect(x, y, w, h);
+  }
+
+  function loop() {
+    const W = Math.max(1, typeof screenWidth === "number" ? screenWidth : 320);
+    const H = Math.max(1, typeof screenHeight === "number" ? screenHeight : 200);
+    c.width = W;
+    c.height = H;
+
+    drawBackground(W, H);
+
+    const frac = thr / 100;
+
+    if (DRAW_THREE_BARS) {
+      drawBar(W, H, BAR_X, START_Y + 0 * (BAR_H + GAP), BAR_W, BAR_H, frac);
+      drawBar(W, H, BAR_X, START_Y + 1 * (BAR_H + GAP), BAR_W, BAR_H, frac);
+      drawBar(W, H, BAR_X, START_Y + 2 * (BAR_H + GAP), BAR_W, BAR_H, frac);
+    } else {
+      // One big chunky bar (takes 25% of screen height)
+      drawBar(W, H, 0.0, 0.62, 1.0, 0.25, frac);
+    }
+
+    requestAnimationFrame(loop);
+  }
+
+  requestAnimationFrame(loop);
+</script>
