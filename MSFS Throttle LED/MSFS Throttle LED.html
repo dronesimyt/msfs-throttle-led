@@ -43,10 +43,10 @@
   function drawBackground(W, H) {
     if (PULSE_BLUE) {
       const t = Date.now() / 1000;
-      const pulse = Math.floor(200 + (Math.sin(t * 1.5) * 27 + 27)); // ~200..254
-      // ctx.fillStyle = `rgb(0,0,${pulse})`;
+      const pulse = Math.floor(100 + (Math.sin(t * 3) * 50 + 50)); // ~100..255
+      ctx.fillStyle = `rgb(0,0,${pulse})`;
       // ctx.fillStyle = "rgb(0,255,0)";
-      ctx.fillStyle = "rgb(0,0,255)";
+      // ctx.fillStyle = "rgb(0,0,255)";
     } else {
       ctx.fillStyle = "rgb(0, 0, 243)";
     }
