@@ -2,7 +2,7 @@
 # msfs_signalrgb_bridge.py
 #
 # Sends:
-#   THR=<0..100>  (throttle lever position, scaled)
+#   THR=<0..100>  (scaled engine power)
 #   C1=R,G,B      (BAR color)
 #   C2=R,G,B      (BACKGROUND color)
 #
@@ -17,28 +17,53 @@ import json
 import time
 from typing import Optional, Tuple
 from urllib.parse import quote
+import signal
 
 import requests
 from SimConnect import SimConnect, AircraftRequests
 
+# -------------------- SignalRGB REST --------------------
 EVENT_URL = "http://localhost:16034/canvas/event"
 SENDER = "MSFSBridge"
 
+# -------------------- Paths --------------------
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(BASE_DIR, "config.json")
-
 THEMES_DIR = os.path.join(BASE_DIR, "themes")
 THEMES_INDEX = os.path.join(THEMES_DIR, "themes.json")
 
+# -------------------- SimBrief / Refresh --------------------
 SIMBRIEF_URL = "https://www.simbrief.com/api/xml.fetcher.php"
 THEME_REFRESH_S = 15.0
 
+# -------------------- Throttle scaling --------------------
 FULL_AT = 70.0  # lever% that maps to 100% (tune)
-SLEEP_S = 0.05  # throttle update rate
+SLEEP_S = 0.05  # update rate (seconds)
 
-# These are "theme semantics" (not SignalRGB event semantics):
-# primary/secondary come from your themes.json colors.
+# -------------------- Theme defaults (hex) --------------------
 DEFAULT_THEME = {"primary": "#ff0000", "secondary": "#0000ff"}
+
+# -------------------- Ctrl+C handling --------------------
+STOP = False
+
+
+def _handle_sigint(sig, frame):
+    global STOP
+    STOP = True
+
+
+signal.signal(signal.SIGINT, _handle_sigint)
+
+# -------------------- (EPR stuff removed / commented out) --------------------
+# epr_full_dynamic = 1.50
+# last_epr_key = None
+# EPR_IDLE = 1.00
+# EPR_WINDOW_S = 20.0
+# EPR_HEADROOM = 0.02
+# EPR_FULL_SMOOTH = 0.08
+# epr_full_smoothed = None
+# EPR_FULL_FLOOR = 1.45
+# EPR_MIN_RANGE = 0.35
 
 
 def clamp(x: float, lo: float, hi: float) -> float:
@@ -65,7 +90,7 @@ def hex_to_rgb(h: str) -> Tuple[int, int, int]:
 
 def post_event(msg: str) -> bool:
     """
-    Critical detail: keep '=' and ',' unescaped, so SignalRGB receives "C1=R,G,B".
+    Keep '=' and ',' unescaped, so SignalRGB receives "C1=R,G,B".
     """
     try:
         ev = quote(msg, safe="=,")
@@ -87,7 +112,6 @@ def load_json(path: str) -> dict:
 
 
 def get_theme_for_airline(index: dict, airline_icao: Optional[str]) -> dict:
-    # index["default"]["colors"]["primary|secondary"]
     default_colors = None
     try:
         default_colors = (index.get("default") or {}).get("colors")
@@ -151,66 +175,150 @@ def pick_first_working_pair(aq: AircraftRequests, candidates) -> Tuple[str, str]
     return candidates[0]
 
 
-def main():
-    sm = SimConnect()
-    aq = AircraftRequests(sm, _time=100)
+def scale_power_to_percent(v1_name: str, avg: float) -> float:
+    """
+    ONLY N1 + lever fallback.
 
+    - If simvar name contains N1: treat as percent (0..100) OR normalize 0..1 -> 0..100.
+    - Otherwise: assume lever-like percent and apply FULL_AT scaling.
+    """
+    name_u = (v1_name or "").upper()
+
+    # --- N1 mode ---
+    if "N1" in name_u:
+        # Some wrappers give 0..100, others 0..1
+        if avg <= 1.0:
+            avg *= 100.0
+        return clamp(avg, 0.0, 100.0)
+
+    # --- Lever fallback ---
+    if avg <= 1.0:
+        avg *= 100.0
+    return clamp((avg / FULL_AT) * 100.0, 0.0, 100.0)
+
+
+def connect_simconnect(
+    candidates,
+) -> Tuple[Optional[SimConnect], Optional[AircraftRequests], Optional[str], Optional[str]]:
+    """
+    Keeps trying to connect until MSFS is running, or STOP=True.
+    Returns (sm, aq, v1_name, v2_name). If STOP, returns (None, None, None, None).
+    """
+    global STOP
+
+    sm = None
+    aq = None
+
+    while aq is None and not STOP:
+        try:
+            print("MSFS not running / SimConnect not available. Waiting...", end="\r", flush=True)
+            sm = SimConnect()
+            aq = AircraftRequests(sm, _time=100)
+
+            v1_name, v2_name = pick_first_working_pair(aq, candidates)
+            print(f"\nConnected. Using vars: {v1_name} {v2_name}")
+            return sm, aq, v1_name, v2_name
+
+        except Exception:
+            aq = None
+            try:
+                if sm:
+                    sm.quit()
+            except Exception:
+                pass
+            sm = None
+            time.sleep(2.0)
+
+    return None, None, None, None
+
+
+def safe_quit(sm: Optional[SimConnect]) -> None:
+    try:
+        if sm:
+            sm.quit()
+    except Exception:
+        pass
+
+
+def main():
+    global STOP
+
+    # Prefer N1; fall back to lever.
+    # (EPR candidates intentionally removed/commented)
     candidates = [
-        ("GENERAL_ENG_THROTTLE_LEVER_POSITION:1", "GENERAL_ENG_THROTTLE_LEVER_POSITION:2"),
-        ("GENERAL_ENG_THROTTLE_LEVER_POSITION_1", "GENERAL_ENG_THROTTLE_LEVER_POSITION_2"),
         ("TURB_ENG_N1:1", "TURB_ENG_N1:2"),
         ("TURB_ENG_N1_1", "TURB_ENG_N1_2"),
+        ("GENERAL_ENG_THROTTLE_LEVER_POSITION:1", "GENERAL_ENG_THROTTLE_LEVER_POSITION:2"),
+        ("GENERAL_ENG_THROTTLE_LEVER_POSITION_1", "GENERAL_ENG_THROTTLE_LEVER_POSITION_2"),
+        # ("TURB_ENG_PRESSURE_RATIO:1", "TURB_ENG_PRESSURE_RATIO:2"),
+        # ("TURB_ENG_PRESSURE_RATIO_1", "TURB_ENG_PRESSURE_RATIO_2"),
+        # ("TURB ENG PRESSURE RATIO:1", "TURB ENG PRESSURE RATIO:2"),
     ]
 
-    v1_name, v2_name = pick_first_working_pair(aq, candidates)
-    print(f"Using vars: {v1_name} {v2_name}")
+    sm, aq, v1_name, v2_name = connect_simconnect(candidates)
+    if STOP:
+        print("\nStopped by user.")
+        return
 
     last_airline = None
     last_colors_sent = None  # (bar_rgb, bg_rgb)
     next_theme_check = 0.0
 
-    while True:
-        now = time.time()
+    while not STOP:
+        try:
+            # reconnect if needed
+            if aq is None:
+                safe_quit(sm)
+                sm, aq, v1_name, v2_name = connect_simconnect(candidates)
+                if STOP:
+                    break
 
-        # Theme refresh (SimBrief -> themes.json -> send colors)
-        if now >= next_theme_check:
-            next_theme_check = now + THEME_REFRESH_S
+            now = time.time()
 
-            cfg = load_json(CONFIG_PATH)
-            themes_index = load_json(THEMES_INDEX)
+            # Theme refresh (SimBrief -> themes.json -> send colors)
+            if now >= next_theme_check:
+                next_theme_check = now + THEME_REFRESH_S
 
-            airline = fetch_simbrief_airline_icao(cfg)
-            theme = get_theme_for_airline(themes_index, airline)
+                cfg = load_json(CONFIG_PATH)
+                themes_index = load_json(THEMES_INDEX)
 
-            # Option A mapping (swapped from your previous B):
-            #   Background = PRIMARY
-            #   Bar        = SECONDARY
-            primary_rgb = hex_to_rgb(theme.get("primary", DEFAULT_THEME["primary"]))
-            secondary_rgb = hex_to_rgb(theme.get("secondary", DEFAULT_THEME["secondary"]))
+                airline = fetch_simbrief_airline_icao(cfg)
+                theme = get_theme_for_airline(themes_index, airline)
 
-            bar_rgb = secondary_rgb
-            bg_rgb = primary_rgb
+                # Option A mapping:
+                #   Background = PRIMARY
+                #   Bar        = SECONDARY
+                primary_rgb = hex_to_rgb(theme.get("primary", DEFAULT_THEME["primary"]))
+                secondary_rgb = hex_to_rgb(theme.get("secondary", DEFAULT_THEME["secondary"]))
 
-            if airline != last_airline or last_colors_sent != (bar_rgb, bg_rgb):
-                # C1 = bar, C2 = background
-                post_event(f"C1={bar_rgb[0]},{bar_rgb[1]},{bar_rgb[2]}")
-                post_event(f"C2={bg_rgb[0]},{bg_rgb[1]},{bg_rgb[2]}")
-                last_airline = airline
-                last_colors_sent = (bar_rgb, bg_rgb)
+                bar_rgb = secondary_rgb
+                bg_rgb = primary_rgb
 
-        # Throttle -> THR
-        v1 = safe_float(aq.get(v1_name))
-        v2 = safe_float(aq.get(v2_name))
-        avg = (v1 + v2) / 2.0
+                if airline != last_airline or last_colors_sent != (bar_rgb, bg_rgb):
+                    post_event(f"C1={bar_rgb[0]},{bar_rgb[1]},{bar_rgb[2]}")
+                    post_event(f"C2={bg_rgb[0]},{bg_rgb[1]},{bg_rgb[2]}")
+                    last_airline = airline
+                    last_colors_sent = (bar_rgb, bg_rgb)
 
-        # normalize 0..1 to 0..100
-        if avg <= 1.0:
-            avg *= 100.0
+            if aq is None:
+                continue
 
-        scaled = clamp((avg / FULL_AT) * 100.0, 0.0, 100.0)
-        post_event(f"THR={scaled:.1f}")
+            v1 = safe_float(aq.get(v1_name))
+            v2 = safe_float(aq.get(v2_name))
+            avg = (v1 + v2) / 2.0
 
-        time.sleep(SLEEP_S)
+            scaled = scale_power_to_percent(v1_name, avg)
+            post_event(f"THR={scaled:.1f}")
+
+            time.sleep(SLEEP_S)
+
+        except Exception:
+            # sim closed / connection dropped
+            aq = None
+            time.sleep(0.5)
+
+    print("\nStopped by user.")
+    safe_quit(sm)
 
 
 if __name__ == "__main__":
