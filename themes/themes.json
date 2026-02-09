@@ -19,7 +19,7 @@
         "secondary": "#f9ba00",
         "text": "#FFFFFF"
       },
-      "logo": { 
+      "logo": {
         "light": "logo_white.png",
         "dark": "logo_color.png"
       }
@@ -51,8 +51,8 @@
     "DAL": {
       "name": "Delta Air Lines",
       "colors": {
-        "primary": "#c20020",
-        "secondary": "#0A1F44",
+        "primary": "#00095e",
+        "secondary": "#f70000",
         "text": "#FFFFFF"
       },
       "logo": {
@@ -69,6 +69,18 @@
       },
       "logo": {
         "light": "logo_white.png",
+        "dark": "logo_color.png"
+      }
+    },
+    "VKG": {
+      "name": "Sunclass Airlines",
+      "colors": {
+        "primary": "#ffdd1d",
+        "secondary": "#ff0000",
+        "text": "#000000"
+      },
+      "logo": {
+        "light": "logo_black.png",
         "dark": "logo_color.png"
       }
     },

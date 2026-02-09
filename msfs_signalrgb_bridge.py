@@ -5,6 +5,8 @@
 #   THR=<0..100>  (scaled engine power)
 #   C1=R,G,B      (BAR color)
 #   C2=R,G,B      (BACKGROUND color)
+#   STR=0|1       (strobe switch state)
+#   BCN=0|1       (beacon switch state)
 #
 # Reads themes from ONE file: themes/themes.json with your structure:
 # {
@@ -54,17 +56,6 @@ def _handle_sigint(sig, frame):
 
 signal.signal(signal.SIGINT, _handle_sigint)
 
-# -------------------- (EPR stuff removed / commented out) --------------------
-# epr_full_dynamic = 1.50
-# last_epr_key = None
-# EPR_IDLE = 1.00
-# EPR_WINDOW_S = 20.0
-# EPR_HEADROOM = 0.02
-# EPR_FULL_SMOOTH = 0.08
-# epr_full_smoothed = None
-# EPR_FULL_FLOOR = 1.45
-# EPR_MIN_RANGE = 0.35
-
 
 def clamp(x: float, lo: float, hi: float) -> float:
     return lo if x < lo else hi if x > hi else x
@@ -90,7 +81,7 @@ def hex_to_rgb(h: str) -> Tuple[int, int, int]:
 
 def post_event(msg: str) -> bool:
     """
-    Keep '=' and ',' unescaped, so SignalRGB receives "C1=R,G,B".
+    Critical detail: keep '=' and ',' unescaped, so SignalRGB receives "C1=R,G,B".
     """
     try:
         ev = quote(msg, safe="=,")
@@ -175,23 +166,45 @@ def pick_first_working_pair(aq: AircraftRequests, candidates) -> Tuple[str, str]
     return candidates[0]
 
 
+def pick_first_working_var(aq, names):
+    for n in names:
+        try:
+            v = aq.get(n)
+            if v is not None:
+                return n
+        except Exception:
+            continue
+    return None
+
+
+def read_bool(aq: AircraftRequests, varname: Optional[str]) -> bool:
+    if aq is None or not varname:
+        return False
+    try:
+        v = aq.get(varname)
+        if v is None:
+            return False
+        # SimConnect bools usually come back as 0/1 (int/float)
+        return float(v) != 0.0
+    except Exception:
+        return False
+
+
 def scale_power_to_percent(v1_name: str, avg: float) -> float:
     """
-    ONLY N1 + lever fallback.
-
-    - If simvar name contains N1: treat as percent (0..100) OR normalize 0..1 -> 0..100.
-    - Otherwise: assume lever-like percent and apply FULL_AT scaling.
+    Current behavior (your "keep as is"):
+    - N1 candidates: treat as percent (0..100) or normalize 0..1 -> 0..100
+    - Throttle lever fallback: FULL_AT scaling
     """
     name_u = (v1_name or "").upper()
 
-    # --- N1 mode ---
+    # N1 mode
     if "N1" in name_u:
-        # Some wrappers give 0..100, others 0..1
         if avg <= 1.0:
             avg *= 100.0
         return clamp(avg, 0.0, 100.0)
 
-    # --- Lever fallback ---
+    # Default: throttle lever position (or any percent-ish var)
     if avg <= 1.0:
         avg *= 100.0
     return clamp((avg / FULL_AT) * 100.0, 0.0, 100.0)
@@ -216,7 +229,7 @@ def connect_simconnect(
             aq = AircraftRequests(sm, _time=100)
 
             v1_name, v2_name = pick_first_working_pair(aq, candidates)
-            print(f"\nConnected. Using vars: {v1_name} {v2_name}")
+            print(f"\nConnected..")
             return sm, aq, v1_name, v2_name
 
         except Exception:
@@ -260,9 +273,29 @@ def main():
         print("\nStopped by user.")
         return
 
+    # --- NEW: pick light simvars (strobe + beacon) once on connect ---
+    strobe_var = None
+    beacon_var = None
+
+    def repick_light_vars():
+        nonlocal strobe_var, beacon_var
+        if aq is None:
+            strobe_var = None
+            beacon_var = None
+            return
+
+        # SimConnect canonical names are usually with spaces:
+        # "LIGHT STROBE", "LIGHT BEACON"
+        strobe_var = pick_first_working_var(aq, ["LIGHT STROBE", "LIGHT STROBE:1", "LIGHT_STROBE"])
+        beacon_var = pick_first_working_var(aq, ["LIGHT BEACON", "LIGHT BEACON:1", "LIGHT_BEACON"])
+
+    repick_light_vars()
+
     last_airline = None
     last_colors_sent = None  # (bar_rgb, bg_rgb)
     next_theme_check = 0.0
+    last_strobe = None
+    last_beacon = None
 
     while not STOP:
         try:
@@ -272,6 +305,9 @@ def main():
                 sm, aq, v1_name, v2_name = connect_simconnect(candidates)
                 if STOP:
                     break
+
+                last_strobe = None
+                last_beacon = None
 
             now = time.time()
 
@@ -303,6 +339,19 @@ def main():
             if aq is None:
                 continue
 
+            # --- NEW: strobe/beacon state -> STR / BCN events ---
+            strobe_on = read_bool(aq, strobe_var)
+            beacon_on = read_bool(aq, beacon_var)
+
+            if last_strobe is None or strobe_on != last_strobe:
+                post_event(f"STR={1 if strobe_on else 0}")
+                last_strobe = strobe_on
+
+            if last_beacon is None or beacon_on != last_beacon:
+                post_event(f"BCN={1 if beacon_on else 0}")
+                last_beacon = beacon_on
+
+            # --- existing throttle -> THR ---
             v1 = safe_float(aq.get(v1_name))
             v2 = safe_float(aq.get(v2_name))
             avg = (v1 + v2) / 2.0

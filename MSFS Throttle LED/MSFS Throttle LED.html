@@ -11,17 +11,22 @@
   const c = document.getElementById("c");
   const ctx = c.getContext("2d");
 
+  // Values coming from Python
   let thr = 0; // 0..100
+  let barColor = [255, 0, 0]; // C1
+  let bgColor = [0, 0, 60]; // C2
 
-  // Event semantics:
-  // C1 = BAR color
-  // C2 = BACKGROUND color
-  let barColor = [255, 0, 0];
-  let bgColor = [0, 0, 255];
+  // NEW: light states from Python
+  let strobeOn = false; // STR=0|1
+  let beaconOn = false; // BCN=0|1
 
-  // DESIGN
-  const PULSE_BG = false; // set true if you want subtle pulsing
-  const DRAW_THREE_BARS = true; // keep your 3 bars look
+  // Flash pattern sync
+  let seqStartMs = 0;
+  let lastActive = false;
+
+  // ---- DESIGN TWEAKS (keep your look) ----
+  const PULSE_BG = true;
+  const DRAW_THREE_BARS = true;
 
   const BAR_X = 0.0;
   const BAR_W = 1.0;
@@ -29,15 +34,19 @@
   const GAP = 0.02;
   const START_Y = 0.55;
 
-  function clamp255(x) {
-    x = Number(x) || 0;
-    return x < 0 ? 0 : x > 255 ? 255 : x;
+  // NEW: top-right square
+  const LIGHT_BOX_SIZE = 0.11; // fraction of screen height
+  const LIGHT_BOX_MARGIN = 0.02; // fraction of screen height
+
+  function clamp255(n) {
+    n = Number(n);
+    if (!Number.isFinite(n)) return 0;
+    return Math.max(0, Math.min(255, n | 0));
   }
 
   function handleEvent(evStr) {
     let s = String(evStr ?? "");
 
-    // Safe to keep: if SignalRGB ever passes encoded strings, this still works.
     try {
       s = decodeURIComponent(s);
     } catch (e) {}
@@ -50,7 +59,21 @@
       return;
     }
 
-    // C1/C2=R,G,B (tolerates spaces)
+    // STR=0|1
+    m = s.match(/STR\s*=\s*([01])/);
+    if (m) {
+      strobeOn = m[1] === "1";
+      return;
+    }
+
+    // BCN=0|1
+    m = s.match(/BCN\s*=\s*([01])/);
+    if (m) {
+      beaconOn = m[1] === "1";
+      return;
+    }
+
+    // C1/C2=R,G,B
     m = s.match(/C([12])\s*=\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)/);
     if (m) {
       const rgb = [
@@ -82,10 +105,11 @@
 
     if (PULSE_BG) {
       const t = Date.now() / 1000;
-      const mult = 0.85 + 0.15 * (Math.sin(t * 1.5) * 0.5 + 0.5);
-      r = clamp255(Math.round(r * mult));
-      g = clamp255(Math.round(g * mult));
-      b = clamp255(Math.round(b * mult));
+      // gentle pulse (keeps your current vibe)
+      const mul = 0.88 + 0.12 * (0.5 + 0.5 * Math.sin(t * 1.5));
+      r = Math.round(r * mul);
+      g = Math.round(g * mul);
+      b = Math.round(b * mul);
     }
 
     ctx.fillStyle = `rgb(${r},${g},${b})`;
@@ -99,12 +123,88 @@
     const h = Math.max(1, Math.round(nh * H));
 
     const fillW = Math.round(w * frac);
-
     ctx.fillStyle = `rgb(${barColor[0]},${barColor[1]},${barColor[2]})`;
     ctx.fillRect(x, y, fillW, h);
 
     ctx.strokeStyle = "rgba(255,255,255,0.15)";
     ctx.strokeRect(x, y, w, h);
+  }
+
+  // NEW: two white flashes, one red flash, synced start
+  function drawLightBox(W, H) {
+    const active = strobeOn || beaconOn;
+
+    if (active && !lastActive) {
+      // lights just turned on -> reset sequence so it always starts white-white-red
+      seqStartMs = Date.now();
+    }
+    lastActive = active;
+
+    // --- ALWAYS draw the box (even when inactive) ---
+    const size = Math.round(LIGHT_BOX_SIZE * H);
+    const m = Math.round(LIGHT_BOX_MARGIN * H);
+    const x = W - m - size;
+    const y = m;
+
+    // frame
+    ctx.strokeStyle = "rgba(255,255,255,0.25)";
+    ctx.strokeRect(x, y, size, size);
+
+    // black background inside
+    ctx.fillStyle = "rgb(0,0,0)";
+    ctx.fillRect(x + 1, y + 1, size - 2, size - 2);
+
+    if (!active) return;
+
+    // pattern steps (ms)
+    // If both: white, off, white, off, red, off
+    // If only strobe: white, off, white, off(long)
+    // If only beacon: red, off(long)
+    let steps;
+
+    if (strobeOn && beaconOn) {
+      steps = [
+        { on: true, color: [255, 255, 255], dur: 100 }, // white flash 1
+        { on: false, dur: 150 }, // gap
+        { on: true, color: [255, 255, 255], dur: 100 }, // white flash 2
+        { on: false, dur: 450 }, // gap
+        { on: true, color: [255, 0, 0], dur: 150 }, // red beacon flash
+        { on: false, dur: 300 }, // gap to complete 1s
+      ];
+    } else if (strobeOn) {
+      steps = [
+        { on: true, color: [255, 255, 255], dur: 100 },
+        { on: false, dur: 150 },
+        { on: true, color: [255, 255, 255], dur: 100 },
+        { on: false, dur: 650 }, // completes 1s
+      ];
+    } else {
+      steps = [
+        { on: true, color: [255, 0, 0], dur: 120 },
+        { on: false, dur: 880 },
+      ];
+    }
+
+    let total = 0;
+    for (const s of steps) total += s.dur;
+
+    const t = (Date.now() - (seqStartMs || Date.now())) % total;
+
+    let acc = 0;
+    let state = steps[steps.length - 1];
+    for (const s of steps) {
+      acc += s.dur;
+      if (t < acc) {
+        state = s;
+        break;
+      }
+    }
+
+    if (!state.on) return;
+
+    const col = state.color;
+    ctx.fillStyle = `rgb(${col[0]},${col[1]},${col[2]})`;
+    ctx.fillRect(x + 1, y + 1, size - 2, size - 2);
   }
 
   function loop() {
@@ -115,7 +215,7 @@
 
     drawBackground(W, H);
 
-    const frac = thr / 100;
+    const frac = Math.max(0, Math.min(1, thr / 100));
 
     if (DRAW_THREE_BARS) {
       drawBar(W, H, BAR_X, START_Y + 0 * (BAR_H + GAP), BAR_W, BAR_H, frac);
@@ -124,6 +224,9 @@
     } else {
       drawBar(W, H, 0.0, 0.62, 1.0, 0.25, frac);
     }
+
+    // NEW: strobe/beacon indicator
+    drawLightBox(W, H);
 
     requestAnimationFrame(loop);
   }
